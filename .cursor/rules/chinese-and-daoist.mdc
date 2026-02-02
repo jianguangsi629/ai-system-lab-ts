@@ -1,0 +1,12 @@
+---
+description: Use Chinese for all communication, comments, docs; prefix replies with [ 道友 ]
+alwaysApply: true
+---
+
+# 语言与格式约定
+
+- **对话**：所有解释、讨论、推理、回复必须使用简体中文。
+- **回复前缀**：每次回复开头必须使用「[ 道友 ]:」。
+- **代码注释**：代码中的注释使用中文；函数名、变量名、类名、文件名保持英文。
+- **文档**：README、PROJECT_PROMPT、各 stage 的说明等文档使用中文撰写或补充中文版。
+- **代码与日志**：代码、标识符、日志与错误信息保持英文，不把中文写进字符串或日志内容。
