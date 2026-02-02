@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "stage:0": "npm run build && node dist/stages/stage-0-model-gateway/examples/basic-usage.js"
+    "stage:0": "npm run build && node dist/stages/stage-0-model-gateway/examples/basic-usage.js",
+    "stage:1": "npm run build && node dist/stages/stage-1-context-engine/examples/basic-usage.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5"
