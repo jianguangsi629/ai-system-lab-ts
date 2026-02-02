@@ -4,15 +4,16 @@ import { ProviderError, type LLMProvider } from "./types.js";
 const DEFAULT_GOOGLE_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta";
 
+type ContentItem =
+  | { role: "user" | "model"; parts: Array<{ text: string }> }
+  | { parts: Array<{ text: string }> };
+
 function extractSystem(messages: ChatRequest["messages"]): {
   system?: string;
-  contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }>;
+  contents: ContentItem[];
 } {
   const systemParts: string[] = [];
-  const contents: Array<{
-    role: "user" | "model";
-    parts: Array<{ text: string }>;
-  }> = [];
+  const contents: ContentItem[] = [];
 
   for (const message of messages) {
     if (message.role === "system") {
@@ -21,6 +22,19 @@ function extractSystem(messages: ChatRequest["messages"]): {
       const role = message.role === "assistant" ? "model" : "user";
       contents.push({ role, parts: [{ text: message.content }] });
     }
+  }
+
+  // Single-turn: one user message only (no assistant). Match official format without role.
+  if (
+    contents.length === 1 &&
+    contents[0] &&
+    "role" in contents[0] &&
+    contents[0].role === "user"
+  ) {
+    return {
+      system: systemParts.length > 0 ? systemParts.join("\n") : undefined,
+      contents: [{ parts: contents[0].parts }],
+    };
   }
 
   return {
@@ -78,12 +92,13 @@ export function createGoogleProvider(config: GoogleConfig): LLMProvider {
         body.systemInstruction = { parts: [{ text: system }] };
       }
 
-      const url = `${baseUrl}/models/${
-        request.model
-      }:generateContent?key=${encodeURIComponent(config.apiKey)}`;
+      const url = `${baseUrl}/models/${request.model}:generateContent`;
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": config.apiKey,
+        },
         body: JSON.stringify(body),
         signal: request.abortSignal,
       });
@@ -113,6 +128,18 @@ export function createGoogleProvider(config: GoogleConfig): LLMProvider {
       const candidate = data.candidates?.[0];
       const content =
         candidate?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+
+      if (!data.candidates?.length || content === "") {
+        const reason = candidate?.finishReason;
+        throw new ProviderError({
+          provider: "google",
+          message:
+            reason && typeof reason === "string"
+              ? `Gemini returned no text (finishReason: ${reason}).`
+              : "Gemini returned no candidates or empty content (possible safety filter or empty response).",
+        });
+      }
+
       const usage = data.usageMetadata
         ? {
             inputTokens: data.usageMetadata.promptTokenCount ?? 0,

@@ -66,6 +66,7 @@ Stage 5：Manus Architecture（产品级系统）
 【工程要求】
 - 每一个 Stage 都是独立可运行的模块
 - 每个 Stage 都有 README，重点解释「系统设计思路」，不是只写 how to run
+- 每一个 example 的代码要加上代码中文注释，解释主要的含义
 - 使用清晰的目录结构和命名
 - 避免框架魔法，优先显式代码
 - 在 README 中使用 ASCII 图表示架构
