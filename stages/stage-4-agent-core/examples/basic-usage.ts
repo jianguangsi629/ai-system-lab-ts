@@ -1,8 +1,8 @@
 /**
- * Stage 3 Tool System 基础用法：
- * - 使用 Stage 0 Gateway + Stage 1 Context Engine + Stage 2 Output Controller
- * - 注册若干工具（get_weather、get_time）
- * - 通过 prompt-based 工具循环：用户提问 -> 模型决定是否调用工具 -> 执行 -> 回注 -> 直到模型返回最终回复
+ * Stage 4 Agent Core 基础用法：
+ * - 使用 Stage 0 Gateway + Stage 1 Context Engine + Stage 2 Output Controller + Stage 3 Tool System
+ * - 通过 runAgent(sessionId, goal) 执行「目标」：注入 goal 为 user 消息，跑工具循环，可选写回 Memory
+ * - 可选 stateStore：持久化每次 run 的状态，支持按 session 查询、失败恢复与审计
  * 输出：知识点、执行逻辑、本步调用顺序（输入 / AI 回复 / 代码处理）。
  */
 
@@ -15,10 +15,14 @@ import {
 } from "../../stage-0-model-gateway/src/index.js";
 import { createContextEngine } from "../../stage-1-context-engine/src/index.js";
 import { createOutputController } from "../../stage-2-output-control/src/index.js";
-import { createToolRegistry, runToolLoop, type Tool } from "../src/index.js";
-import type { ProcessingReport } from "../src/types.js";
+import {
+  createToolRegistry,
+  type Tool,
+} from "../../stage-3-tool-system/src/index.js";
+import type { ProcessingReport } from "../../stage-3-tool-system/src/types.js";
+import { createAgentStateStore, runAgent } from "../src/index.js";
 
-// ---------- 工具定义 ----------
+// ---------- 工具定义（与 Stage 3 示例一致）----------
 
 const getWeatherTool: Tool<
   { city: string },
@@ -73,23 +77,23 @@ function formatProcessing(p: ProcessingReport): string {
   }`;
 }
 
-/** 打印 Stage 3 知识点. */
+/** 打印 Stage 4 知识点. */
 function printKnowledgePoints() {
-  console.log("\n========== Stage 3 知识点 ==========");
+  console.log("\n========== Stage 4 知识点 ==========");
   console.log(
-    "1. Tool 抽象：name、description、parameters（JSON Schema）、execute(args)。"
+    "1. 任务入口 Goal：runAgent(sessionId, goal) 将 goal 作为 user 消息交给 runToolLoop。"
   );
   console.log(
-    "2. Tool Registry：register、get、list、execute；runToolLoop 依赖 chat、contextEngine、outputController、toolRegistry。"
+    "2. 多步执行：沿用 Stage 3 runToolLoop，LLM 决策→解析→执行工具→回注，直到 final reply 或 maxRounds。"
   );
   console.log(
-    "3. LLM 决策：prompt-based，要求模型仅返回 JSON，{ tool: name, arguments } 或 { tool: null, reply }。"
+    "3. 中间状态：runId、AgentRunState（status、toolRounds、reply、error）；可选 AgentStateStore 持久化。"
   );
   console.log(
-    "4. 工具执行与回注：解析出 tool 非 null 时 Registry.execute，结果以 user 消息追加，再 chat，形成循环。"
+    "4. Memory 写回：可选 run 结束后 setSummary(sessionId, summary) 供后续对话使用。"
   );
   console.log(
-    "5. runToolLoop：写入 system+user → 循环 chat→解析→(工具执行→回注) 直到 tool:null 或 maxRounds。"
+    "5. runAgent：生成 runId、写 stateStore(running)、runToolLoop、写 stateStore(completed/failed)、可选 setSummary。"
   );
   console.log("====================================\n");
 }
@@ -97,10 +101,13 @@ function printKnowledgePoints() {
 /** 打印执行逻辑. */
 function printExecutionLogic() {
   console.log("---------- 执行逻辑 ----------");
-  console.log("1. 第一段：仅 Registry + 本地执行（不调模型）。");
   console.log(
-    "2. 第二段：runToolLoop(deps, sessionId, userMessage)；每轮 chat→parse→(tool_call 则 execute+inject) 或 final_reply 结束。"
+    "1. 创建 engine、gateway、outputController、registry、stateStore，组装 deps。"
   );
+  console.log(
+    "2. runAgent(deps, sessionId, goal)：runToolLoop 内每轮 chat→parse→(tool_call 则 execute+inject) 或 final_reply。"
+  );
+  console.log("3. 结束后写 stateStore、可选 setSummary；返回 AgentRunResult。");
   console.log("------------------------------------\n");
 }
 
@@ -122,25 +129,11 @@ async function main() {
       cost?: { totalCents: number; currency: string };
     };
   }> = [];
-  const processingLog: Array<{ round: number; processing: ProcessingReport }> =
-    [];
-
-  const registry = createToolRegistry();
-  registry.register(getWeatherTool);
-  registry.register(getTimeTool);
-
-  console.log(
-    "Registered tools:",
-    registry.list().map((t) => t.name)
-  );
-
-  const weatherResult = await registry.execute("get_weather", {
-    city: "Beijing",
-  });
-  console.log("Direct tool call get_weather(Beijing):", weatherResult);
-
-  const timeResult = await registry.execute("get_time", {});
-  console.log("Direct tool call get_time():", timeResult);
+  const processingLog: Array<{
+    runId: string;
+    round: number;
+    processing: ProcessingReport;
+  }> = [];
 
   const engine = createContextEngine({
     maxTokens: 4000,
@@ -197,39 +190,52 @@ async function main() {
     stripMarkdownCodeBlock: true,
   });
 
+  const registry = createToolRegistry();
+  registry.register(getWeatherTool);
+  registry.register(getTimeTool);
+
+  const stateStore = createAgentStateStore();
+
   const deps = {
     chat: wrappedChat,
     contextEngine: engine,
     outputController,
     toolRegistry: registry,
+    stateStore,
   };
 
-  const userMessage =
-    "What is the weather in Shanghai? Reply in one short sentence.";
-  console.log("\nUser:", userMessage);
+  const goal = "What is the weather in Shanghai? Reply in one short sentence.";
+  console.log("Goal:", goal);
 
-  const result = await runToolLoop(deps, sessionId, userMessage, {
+  const result = await runAgent(deps, sessionId, goal, {
     maxToolRounds: 5,
     temperature: 0.1,
     maxTokens: 500,
-    onAfterChat: (round, _chatResult, processing) => {
-      processingLog.push({ round, processing });
+    writeSummaryToMemory: true,
+    onAfterChat: (runId, round, _chatResult, processing) => {
+      processingLog.push({ runId, round, processing });
     },
   });
 
   console.log("\n========== 结果 ==========");
+  console.log("Run id:", result.runId);
+  console.log("成功:", result.success);
   if (result.reply !== undefined) {
-    console.log("Assistant reply:", result.reply);
-  } else {
+    console.log("Reply:", result.reply);
+  } else if (result.lastRawContent) {
     console.log(
-      "No final reply; last raw content:",
-      result.lastRawContent?.slice(0, 200)
+      "Last raw (no final reply):",
+      result.lastRawContent.slice(0, 200)
     );
   }
-  console.log("Tool rounds executed:", result.toolRounds);
-  if (result.maxRoundsReached) {
-    console.log("(Max tool rounds reached)");
-  }
+  console.log("Tool rounds:", result.toolRounds);
+  console.log("Max rounds reached:", result.maxRoundsReached);
+  if (result.error) console.log("Error:", result.error);
+
+  const runs = stateStore.listBySession(sessionId);
+  console.log("Runs in session:", runs.length);
+  const summary = engine.getSummary(sessionId);
+  console.log("Memory summary:", summary ?? "(none)");
 
   console.log(
     "\n========== 本步调用顺序（输入 / AI 回复 / 代码处理）=========="

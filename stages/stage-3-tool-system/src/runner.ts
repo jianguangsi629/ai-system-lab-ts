@@ -7,6 +7,7 @@ import type { ContextEngine } from "../../stage-1-context-engine/src/index.js";
 import type { ChatResult } from "../../stage-0-model-gateway/src/types.js";
 import type { OutputController } from "../../stage-2-output-control/src/types.js";
 import type {
+  ProcessingReport,
   ToolDecisionOutput,
   ToolLoopOptions,
   ToolRegistry,
@@ -145,6 +146,11 @@ export async function runToolLoop(
 
     const parsed = parseToolDecision(deps.outputController, chatResult.content);
     if (!parsed.success) {
+      const processing: ProcessingReport = {
+        kind: "parse_failed",
+        errors: parsed.errors,
+      };
+      options.onAfterChat?.(round, chatResult, processing);
       return {
         reply: undefined,
         toolRounds,
@@ -155,6 +161,11 @@ export async function runToolLoop(
 
     const { data } = parsed;
     if (data.tool === null || data.tool === undefined) {
+      const processing: ProcessingReport = {
+        kind: "final_reply",
+        reply: data.reply ?? "",
+      };
+      options.onAfterChat?.(round, chatResult, processing);
       return {
         reply: data.reply ?? "",
         toolRounds,
@@ -168,6 +179,17 @@ export async function runToolLoop(
       data.tool,
       data.arguments ?? {}
     );
+    const resultSnippet =
+      typeof toolResult === "string"
+        ? toolResult.slice(0, 200) + (toolResult.length > 200 ? "..." : "")
+        : String(toolResult).slice(0, 200);
+    const processing: ProcessingReport = {
+      kind: "tool_call",
+      tool: data.tool,
+      args: data.arguments ?? {},
+      resultSnippet,
+    };
+    options.onAfterChat?.(round, chatResult, processing);
     const injectMessage = `[Tool result for ${data.tool}]\n${toolResult}`;
     deps.contextEngine.addMessage(sessionId, {
       role: "user",

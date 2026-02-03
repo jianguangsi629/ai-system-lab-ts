@@ -11,7 +11,9 @@
     "stage:0": "npm run build && node dist/stages/stage-0-model-gateway/examples/basic-usage.js",
     "stage:1": "npm run build && node dist/stages/stage-1-context-engine/examples/basic-usage.js",
     "stage:2": "npm run build && node dist/stages/stage-2-output-control/examples/basic-usage.js",
-    "stage:3": "npm run build && node dist/stages/stage-3-tool-system/examples/basic-usage.js"
+    "stage:3": "npm run build && node dist/stages/stage-3-tool-system/examples/basic-usage.js",
+    "stage:4": "npm run build && node dist/stages/stage-4-agent-core/examples/basic-usage.js",
+    "stage:5": "npm run build && node dist/stages/stage-5-manus-architecture/examples/basic-usage.js"
   },
   "dependencies": {
     "ajv": "^8.17.1",

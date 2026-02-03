@@ -78,6 +78,17 @@ export interface ToolRegistry {
   execute(name: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
+/** Report of how we processed one chat response (for narrative / audit). */
+export type ProcessingReport =
+  | { kind: "parse_failed"; errors: string[] }
+  | { kind: "final_reply"; reply: string }
+  | {
+      kind: "tool_call";
+      tool: string;
+      args: Record<string, unknown>;
+      resultSnippet: string;
+    };
+
 /** Options for the prompt-based tool loop. */
 export interface ToolLoopOptions {
   /** Max rounds of: LLM -> parse -> execute tool -> inject result -> LLM again. */
@@ -86,4 +97,10 @@ export interface ToolLoopOptions {
   temperature?: number;
   /** Max tokens per chat response. */
   maxTokens?: number;
+  /** Called after each chat: round index, chat result, and how we processed it (parse failed / final reply / tool call + result). */
+  onAfterChat?: (
+    round: number,
+    chatResult: import("../../stage-0-model-gateway/src/types.js").ChatResult,
+    processing: ProcessingReport
+  ) => void;
 }

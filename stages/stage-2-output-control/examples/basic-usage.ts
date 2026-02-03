@@ -4,6 +4,7 @@
  * - 要求模型返回结构化 JSON
  * - 用 Output Controller 解析并校验 LLM 输出（LLM 视为不可信节点）
  * - 处理解析/校验失败的情况
+ * 输出：知识点、执行逻辑、本步调用顺序（输入 / AI 回复 / 代码处理）。
  */
 
 import {
@@ -33,13 +34,43 @@ interface PersonOutput {
   age: number;
 }
 
+/** 打印 Stage 2 知识点. */
+function printKnowledgePoints() {
+  console.log("\n========== Stage 2 知识点 ==========");
+  console.log(
+    "1. LLM 视为不可信节点：模型输出可能非 JSON、缺字段、类型错，一律先解析再按 schema 校验。"
+  );
+  console.log(
+    "2. 结构化输出与 JSON Schema：用 schema 描述期望形状；Output Controller 解析 + ajv 校验 → ParseResult<T>。"
+  );
+  console.log(
+    "3. 解析策略：剥 markdown 代码块、取首段 JSON，避免模型前后说明污染解析。"
+  );
+  console.log(
+    "4. 与 Stage 0/1 分工：Gateway 给 raw text；Output Controller 给 parsed+validated 的 T 或 errors。"
+  );
+  console.log("====================================\n");
+}
+
+/** 打印执行逻辑. */
+function printExecutionLogic() {
+  console.log("---------- 执行逻辑 ----------");
+  console.log("1. 第一/二段：本地 parseAndValidate 好/坏样例（不调模型）。");
+  console.log(
+    "2. 第三段：Context Engine 准备 messages → Gateway.chat 拿 content → parseAndValidate(content)；成功则写回会话。"
+  );
+  console.log("------------------------------------\n");
+}
+
 async function main() {
+  printKnowledgePoints();
+  printExecutionLogic();
+
   const outputController = createOutputController({
     stripMarkdownCodeBlock: true,
   });
 
   // ---------- 第一段：本地「好」样例（不调模型）----------
-  // 模拟模型返回的「正确」格式：带 ```json ... ``` 的合法 JSON，解析+校验应通过
   const rawGood = '```json\n{"name": "Alice", "age": 30}\n```';
   const resultGood = outputController.parseAndValidate<PersonOutput>(rawGood, {
     schema: PERSON_SCHEMA,
@@ -51,7 +82,6 @@ async function main() {
   }
 
   // ---------- 第二段：本地「坏」样例（不调模型）----------
-  // 模拟模型乱写类型：age 为字符串，校验应失败，体现「不信任 raw」
   const rawBad = '{"name": "Bob", "age": "not a number"}';
   const resultBad = outputController.parseAndValidate<PersonOutput>(rawBad, {
     schema: PERSON_SCHEMA,
@@ -63,6 +93,20 @@ async function main() {
   }
 
   // ---------- 第三段：完整流水线（Context Engine → Gateway → Output Controller）----------
+  const chatCallLog: Array<{
+    request: {
+      messageCount: number;
+      temperature?: number;
+      maxTokens?: number;
+      lastContentSnippet: string;
+    };
+    response: {
+      contentSnippet: string;
+      usage?: { inputTokens: number; outputTokens: number };
+      cost?: { totalCents: number; currency: string };
+    };
+  }> = [];
+
   const engine = createContextEngine({
     maxTokens: 2000,
     maxMessages: 20,
@@ -70,7 +114,6 @@ async function main() {
   });
 
   const sessionId = engine.createSession();
-  // 系统提示：只返回 JSON，且形状为 { name, age }
   const systemPrompt = `You are a helpful assistant. Extract structured data from the user's message.
 Respond with a single JSON object only, no other text. Use this shape: { "name": string, "age": number }.
 Example: {"name": "Alice", "age": 25}`;
@@ -80,7 +123,6 @@ Example: {"name": "Alice", "age": 25}`;
     content: "My name is Charlie and I am 28 years old.",
   });
 
-  // 组装 Gateway，用于发真实请求
   const providers = buildProviderConfigFromModelMaps();
   const defaultModel = getDefaultModelFromMaps();
   const modelProviderMap = getModelProviderMapFromMaps();
@@ -93,19 +135,42 @@ Example: {"name": "Alice", "age": 25}`;
     modelProviderMap,
     fallbackModels,
     timeoutMs: 20000,
+    logger: {
+      logRequest: () => {},
+      logResponse: () => {},
+      logError: (e) => console.error(e),
+    },
   });
 
-  // 取当前会话消息，发一次 chat，拿到模型原始 content
   const messages = engine.getMessagesForRequest(sessionId, {
     includeSummaryAsSystem: false,
   });
-  const chatResult = await gateway.chat({
+  const request = {
     messages,
     temperature: 0.1,
     maxTokens: 500,
+  };
+  const chatResult = await gateway.chat(request);
+
+  const lastMsg = request.messages[request.messages.length - 1];
+  chatCallLog.push({
+    request: {
+      messageCount: request.messages.length,
+      temperature: request.temperature,
+      maxTokens: request.maxTokens,
+      lastContentSnippet:
+        (lastMsg?.content ?? "").slice(0, 80) +
+        ((lastMsg?.content?.length ?? 0) > 80 ? "..." : ""),
+    },
+    response: {
+      contentSnippet:
+        chatResult.content.slice(0, 200) +
+        (chatResult.content.length > 200 ? "..." : ""),
+      usage: chatResult.usage,
+      cost: chatResult.cost,
+    },
   });
 
-  // 对模型返回的 content 做解析+校验，得到可信的 T 或错误列表
   const parsed = outputController.parseAndValidate<PersonOutput>(
     chatResult.content,
     { schema: PERSON_SCHEMA }
@@ -113,7 +178,6 @@ Example: {"name": "Alice", "age": 25}`;
 
   if (parsed.success) {
     console.log("\nStructured output from LLM:", parsed.data);
-    // 校验通过才把助手回复写回会话
     engine.addMessage(sessionId, {
       role: "assistant",
       content: chatResult.content,
@@ -124,6 +188,40 @@ Example: {"name": "Alice", "age": 25}`;
       console.log("Raw snippet:", parsed.raw.slice(0, 200));
     }
   }
+
+  console.log("\n========== 本步调用顺序（第三段：一次 chat）==========");
+  for (let i = 0; i < chatCallLog.length; i++) {
+    const call = chatCallLog[i];
+    console.log(`\n--- 第 ${i + 1} 次调用 ---`);
+    console.log(
+      "输入:",
+      `消息条数=${call.request.messageCount}`,
+      `temperature=${call.request.temperature ?? "-"}`,
+      `maxTokens=${call.request.maxTokens ?? "-"}`,
+      `最后一条内容摘要: ${call.request.lastContentSnippet || "(无)"}`
+    );
+    console.log(
+      "AI 回复:",
+      `内容摘要: ${call.response.contentSnippet}`,
+      `usage: input=${call.response.usage?.inputTokens ?? "-"} output=${
+        call.response.usage?.outputTokens ?? "-"
+      }`,
+      call.response.cost
+        ? `cost=${call.response.cost.totalCents} 美分 ${call.response.cost.currency}`
+        : ""
+    );
+    console.log(
+      "代码处理:",
+      parsed.success
+        ? `parseAndValidate 通过，得到 ${JSON.stringify(
+            parsed.data
+          )}，并将助手回复 addMessage 写回会话。`
+        : `parseAndValidate 失败: ${parsed.errors.join("; ")}，未写回会话。`
+    );
+  }
+  console.log(
+    "\n============================================================\n"
+  );
 }
 
 main().catch((err) => {
